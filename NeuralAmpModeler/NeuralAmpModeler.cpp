@@ -78,6 +78,10 @@ const double kDefaultInputCalibrationLevel = 12.0;
 NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
 : Plugin(info, MakeConfig(kNumParams, kNumPresets))
 {
+  // 修改为立体声配置
+  MakeDefaultInput(ERoute::kInput, 0, 2, "AudioInput"); // 立体声输入
+  MakeDefaultOutput(ERoute::kOutput, 0, 2, "AudioOutput"); // 立体声输出
+  
   _InitToneStack();
   nam::activations::Activation::enable_fast_tanh();
   GetParam(kInputLevel)->InitGain("Input", 0.0, -20.0, 20.0, 0.1);
@@ -93,6 +97,11 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
   GetParam(kCalibrateInput)->InitBool(kCalibrateInputParamName.c_str(), kDefaultCalibrateInput);
   GetParam(kInputCalibrationLevel)
     ->InitDouble(kInputCalibrationLevelParamName.c_str(), kDefaultInputCalibrationLevel, -60.0, 60.0, 0.1, "dBu");
+    
+  // 初始化新参数
+  GetParam(kProcessingMode)->InitEnum("Mode", 0, {"Guitar", "Vocal"});
+  GetParam(kABToggle)->InitEnum("Slot", 0, {"A", "B"});
+  GetParam(kABMix)->InitDouble("A/B Mix", 0.0, 0.0, 1.0, 0.01);
 
   mNoiseGateTrigger.AddListener(&mNoiseGateGain);
 
@@ -130,9 +139,9 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     const auto fileBackgroundBitmap = pGraphics->LoadBitmap(FILEBACKGROUND_FN);
     const auto inputLevelBackgroundBitmap = pGraphics->LoadBitmap(INPUTLEVELBACKGROUND_FN);
     const auto linesBitmap = pGraphics->LoadBitmap(LINES_FN);
-    const auto knobBackgroundBitmap = pGraphics->LoadBitmap(KNOBBACKGROUND_FN);
-    const auto switchHandleBitmap = pGraphics->LoadBitmap(SLIDESWITCHHANDLE_FN);
-    const auto meterBackgroundBitmap = pGraphics->LoadBitmap(METERBACKGROUND_FN);
+    const auto knobBackgroundBitmap = pGraphics->LoadSVG(KNOBBACKGROUND_FN);
+    const auto switchHandleBitmap = pGraphics->LoadSVG(SLIDESWITCHHANDLE_FN);
+    const auto meterBackgroundBitmap = pGraphics->LoadSVG(METERBACKGROUND_FN);
 
     const auto b = pGraphics->GetBounds();
     const auto mainArea = b.GetPadded(-20);
@@ -273,6 +282,56 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
 
     // pGraphics->GetControlWithTag(kCtrlTagOutNorm)->SetMouseEventsWhenDisabled(false);
     // pGraphics->GetControlWithTag(kCtrlTagCalibrateInput)->SetMouseEventsWhenDisabled(false);
+
+    // 添加模式切换和A/B控件区域
+    const auto modeToggleHeight = 25.0f;
+    const auto modeToggleWidth = 100.0f;
+    const auto abControlsWidth = 120.0f;
+    
+    // 在顶部区域添加模式切换开关
+    const auto modeToggleArea = titleArea.GetFromRight(modeToggleWidth).GetMidVPadded(modeToggleHeight/2);
+    
+    // 添加A/B切换和混合控制区域
+    const auto abControlsArea = contentArea.GetFromTop(30.0f).GetFromLeft(abControlsWidth).GetVShifted(titleHeight);
+    const auto abToggleArea = abControlsArea.GetFromLeft(40.0f);
+    const auto abMixArea = abControlsArea.GetFromRight(abControlsArea.W() - 45.0f);
+
+    // 添加模式切换开关 - 使用SVGSwitchControl替换TextButtonControl
+    pGraphics->AttachControl(new ISVGSwitchControl(modeToggleArea, [this](IControl* pCaller) {
+      const int currentMode = GetParam(kProcessingMode)->Int();
+      GetParam(kProcessingMode)->Set(currentMode == 0 ? 1 : 0); // 切换模式
+    }, 
+    {pGraphics->LoadSVG(SLIDESWITCHRECT_FN), pGraphics->LoadSVG(SLIDESWITCHRECT_FN)}));
+    
+    // 添加模式文本标签
+    pGraphics->AttachControl(new ITextControl(modeToggleArea.GetVShifted(-15), "处理模式", IText(15)));
+    pGraphics->AttachControl(new ITextControl(modeToggleArea, [this](IControl* pCaller) {
+      const int mode = GetParam(kProcessingMode)->Int();
+      return mode == 0 ? "吉他模式" : "人声模式";
+    }, IText(14)));
+    
+    // 添加A/B切换按钮 - 使用SVGSwitchControl
+    pGraphics->AttachControl(new ISVGSwitchControl(abToggleArea, kABToggle, 
+      {pGraphics->LoadSVG(SLIDESWITCHRECT_FN), pGraphics->LoadSVG(SLIDESWITCHRECT_FN)}));
+    
+    // 添加A/B标签
+    pGraphics->AttachControl(new ITextControl(abToggleArea.GetVShifted(-15), "A/B槽位", IText(15)));
+    pGraphics->AttachControl(new ITextControl(abToggleArea, [this](IControl* pCaller) {
+      const int slot = GetParam(kABToggle)->Int();
+      return slot == 0 ? "槽位 A" : "槽位 B";
+    }, IText(14)));
+    
+    // 添加A/B混合滑块
+    pGraphics->AttachControl(new IVKnobControl(abMixArea, kABMix, "A/B 混合", DEFAULT_STYLE, true, true));
+
+    // 修改模型和IR加载按钮使用我们的新函数
+    pGraphics->AttachControl(new SVGButtonControl(modelIconArea, [&](IControl* pCaller) {
+      _OpenModelFileChooser();
+    }, pGraphics->LoadSVG(DSPICON_FN)));
+    
+    pGraphics->AttachControl(new SVGButtonControl(irSwitchArea, [&](IControl* pCaller) {
+      _OpenIRFileChooser(); 
+    }, pGraphics->LoadSVG(IRICON_FN)), kCtrlTagIRToggle);
   };
 }
 
@@ -288,6 +347,10 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
   const size_t numChannelsInternal = kNumChannelsInternal;
   const size_t numFrames = (size_t)nFrames;
   const double sampleRate = GetSampleRate();
+  
+  // 获取A/B混合比例
+  const double abMix = GetParam(kABMix)->Value();
+  const bool useABMixing = abMix > 0.0 && abMix < 1.0 && mModelA && mModelB;
 
   // Disable floating point denormals
   std::fenv_t fe_state;
@@ -295,68 +358,155 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
   disable_denormals();
 
   _PrepareBuffers(numChannelsInternal, numFrames);
-  // Input is collapsed to mono in preparation for the NAM.
+  // 保留立体声信息
   _ProcessInput(inputs, numFrames, numChannelsExternalIn, numChannelsInternal);
   _ApplyDSPStaging();
   const bool noiseGateActive = GetParam(kNoiseGateActive)->Value();
   const bool toneStackActive = GetParam(kEQActive)->Value();
 
-  // Noise gate trigger
-  sample** triggerOutput = mInputPointers;
+  // 噪声门处理（对每个通道单独处理）
+  sample** triggerOutputL = mInputPointers;
+  sample** triggerOutputR = mInputPointers + 1;
+  
   if (noiseGateActive)
   {
     const double time = 0.01;
-    const double threshold = GetParam(kNoiseGateThreshold)->Value(); // GetParam...
-    const double ratio = 0.1; // Quadratic...
+    const double threshold = GetParam(kNoiseGateThreshold)->Value();
+    const double ratio = 0.1;
     const double openTime = 0.005;
     const double holdTime = 0.01;
     const double closeTime = 0.05;
     const dsp::noise_gate::TriggerParams triggerParams(time, threshold, ratio, openTime, holdTime, closeTime);
     mNoiseGateTrigger.SetParams(triggerParams);
     mNoiseGateTrigger.SetSampleRate(sampleRate);
-    triggerOutput = mNoiseGateTrigger.Process(mInputPointers, numChannelsInternal, numFrames);
+    
+    // 对左右声道分别处理
+    triggerOutputL = mNoiseGateTrigger.Process(mInputPointers, 1, numFrames);
+    triggerOutputR = mNoiseGateTrigger.Process(mInputPointers + 1, 1, numFrames);
   }
 
+  // 为AB混合准备临时缓冲区
+  std::vector<float> tempOutputL;
+  std::vector<float> tempOutputR;
+  std::vector<float> tempOutput2L;
+  std::vector<float> tempOutput2R;
+  
+  if (useABMixing) {
+    tempOutputL.resize(numFrames);
+    tempOutputR.resize(numFrames);
+    tempOutput2L.resize(numFrames);
+    tempOutput2R.resize(numFrames);
+  }
+  
+  // 标准模型处理（当前槽位或槽位A）
   if (mModel != nullptr)
   {
-    mModel->process(triggerOutput[0], mOutputPointers[0], nFrames);
+    if (useABMixing) {
+      // 处理A槽位
+      if (mModelA != nullptr) {
+        mModelA->process(triggerOutputL[0], tempOutputL.data(), nFrames);
+        mModelA->process(triggerOutputR[0], tempOutputR.data(), nFrames);
+      } else {
+        // 如果A槽位没有模型，直接传递
+        for (size_t s = 0; s < numFrames; s++) {
+          tempOutputL[s] = triggerOutputL[0][s];
+          tempOutputR[s] = triggerOutputR[0][s];
+        }
+      }
+      
+      // 处理B槽位
+      if (mModelB != nullptr) {
+        mModelB->process(triggerOutputL[0], tempOutput2L.data(), nFrames);
+        mModelB->process(triggerOutputR[0], tempOutput2R.data(), nFrames);
+      } else {
+        // 如果B槽位没有模型，直接传递
+        for (size_t s = 0; s < numFrames; s++) {
+          tempOutput2L[s] = triggerOutputL[0][s];
+          tempOutput2R[s] = triggerOutputR[0][s];
+        }
+      }
+      
+      // 混合两个槽位的输出
+      for (size_t s = 0; s < numFrames; s++) {
+        mOutputArray[0][s] = tempOutputL[s] * (1.0 - abMix) + tempOutput2L[s] * abMix;
+        mOutputArray[1][s] = tempOutputR[s] * (1.0 - abMix) + tempOutput2R[s] * abMix;
+      }
+    } else {
+      // 正常处理（无混合）
+      mModel->process(triggerOutputL[0], mOutputPointers[0], nFrames);
+      mModel->process(triggerOutputR[0], mOutputPointers[1], nFrames);
+    }
   }
   else
   {
-    _FallbackDSP(triggerOutput, mOutputPointers, numChannelsInternal, numFrames);
+    // 对左右声道分别应用备用DSP
+    _FallbackDSP(&triggerOutputL[0], &mOutputPointers[0], 1, numFrames);
+    _FallbackDSP(&triggerOutputR[0], &mOutputPointers[1], 1, numFrames);
   }
-  // Apply the noise gate after the NAM
-  sample** gateGainOutput =
-    noiseGateActive ? mNoiseGateGain.Process(mOutputPointers, numChannelsInternal, numFrames) : mOutputPointers;
 
-  sample** toneStackOutPointers = (toneStackActive && mToneStack != nullptr)
-                                    ? mToneStack->Process(gateGainOutput, numChannelsInternal, numFrames)
-                                    : gateGainOutput;
+  // 处理噪声门和后续效果
+  
+  // 临时存储后处理前的输出
+  sample** processingSignalL = &mOutputPointers[0];
+  sample** processingSignalR = &mOutputPointers[1];
+  
+  // 对左右声道分别应用噪声门
+  sample** gateGainOutputL = noiseGateActive ? mNoiseGateGain.Process(processingSignalL, 1, numFrames) : processingSignalL;
+  sample** gateGainOutputR = noiseGateActive ? mNoiseGateGain.Process(processingSignalR, 1, numFrames) : processingSignalR;
 
-  sample** irPointers = toneStackOutPointers;
+  // 对左右声道分别应用音调控制
+  sample** toneStackOutPointersL = (toneStackActive && mToneStack != nullptr)
+                                    ? mToneStack->Process(gateGainOutputL, 1, numFrames)
+                                    : gateGainOutputL;
+  sample** toneStackOutPointersR = (toneStackActive && mToneStack != nullptr)
+                                    ? mToneStack->Process(gateGainOutputR, 1, numFrames)
+                                    : gateGainOutputR;
+
+  // 对左右声道分别应用IR
+  sample** irPointersL = toneStackOutPointersL;
+  sample** irPointersR = toneStackOutPointersR;
   if (mIR != nullptr && GetParam(kIRToggle)->Value())
-    irPointers = mIR->Process(toneStackOutPointers, numChannelsInternal, numFrames);
+  {
+    irPointersL = mIR->Process(toneStackOutPointersL, 1, numFrames);
+    irPointersR = mIR->Process(toneStackOutPointersR, 1, numFrames);
+  }
 
-  // And the HPF for DC offset (Issue 271)
+  // 对左右声道分别应用高通滤波器
   const double highPassCutoffFreq = kDCBlockerFrequency;
-  // const double lowPassCutoffFreq = 20000.0;
   const recursive_linear_filter::HighPassParams highPassParams(sampleRate, highPassCutoffFreq);
-  // const recursive_linear_filter::LowPassParams lowPassParams(sampleRate, lowPassCutoffFreq);
   mHighPass.SetParams(highPassParams);
-  // mLowPass.SetParams(lowPassParams);
-  sample** hpfPointers = mHighPass.Process(irPointers, numChannelsInternal, numFrames);
-  // sample** lpfPointers = mLowPass.Process(hpfPointers, numChannelsInternal, numFrames);
+  sample** hpfPointersL = mHighPass.Process(irPointersL, 1, numFrames);
+  sample** hpfPointersR = mHighPass.Process(irPointersR, 1, numFrames);
+
+  // 还原左右声道的处理结果到输出缓冲区
+  if (!useABMixing) { // 如果使用了AB混合，上面已经设置了mOutputArray
+    for (size_t s = 0; s < numFrames; s++)
+    {
+      mOutputArray[0][s] = hpfPointersL[0][s];
+      mOutputArray[1][s] = hpfPointersR[0][s];
+    }
+  } else {
+    // 应用后处理效果到混合后的信号
+    for (size_t s = 0; s < numFrames; s++)
+    {
+      // 应用噪声门增益
+      if (noiseGateActive) {
+        mOutputArray[0][s] *= gateGainOutputL[0][s] / mOutputPointers[0][s];
+        mOutputArray[1][s] *= gateGainOutputR[0][s] / mOutputPointers[1][s];
+      }
+      
+      // 此处可以应用其他后处理效果
+      // ...
+    }
+  }
 
   // restore previous floating point state
   std::feupdateenv(&fe_state);
 
   // Let's get outta here
   // This is where we exit mono for whatever the output requires.
-  _ProcessOutput(hpfPointers, outputs, numFrames, numChannelsInternal, numChannelsExternalOut);
-  // _ProcessOutput(lpfPointers, outputs, numFrames, numChannelsInternal, numChannelsExternalOut);
-  // * Output of input leveling (inputs -> mInputPointers),
-  // * Output of output leveling (mOutputPointers -> outputs)
-  _UpdateMeters(mInputPointers, outputs, numFrames, numChannelsInternal, numChannelsExternalOut);
+  _ProcessOutput(mOutputPointers, outputs, numFrames, numChannelsInternal, numChannelsExternalOut);
+  _UpdateMeters(mInputPointers, mOutputPointers, numFrames, numChannelsInternal, numChannelsInternal);
 }
 
 void NeuralAmpModeler::OnReset()
@@ -476,6 +626,19 @@ void NeuralAmpModeler::OnParamChange(int paramIdx)
     case kToneBass: mToneStack->SetParam("bass", GetParam(paramIdx)->Value()); break;
     case kToneMid: mToneStack->SetParam("middle", GetParam(paramIdx)->Value()); break;
     case kToneTreble: mToneStack->SetParam("treble", GetParam(paramIdx)->Value()); break;
+    case kProcessingMode:
+    {
+      const int modeIdx = GetParam(kProcessingMode)->Int();
+      ProcessingMode newMode = static_cast<ProcessingMode>(modeIdx);
+      _UpdateParamsForMode(newMode);
+      break;
+    }
+    case kABToggle:
+    {
+      const bool useSlotB = GetParam(kABToggle)->Int() == 1;
+      _SwitchABSlot(useSlotB);
+      break;
+    }
     default: break;
   }
 }
@@ -810,48 +973,68 @@ void NeuralAmpModeler::_PrepareIOPointers(const size_t numChannels)
 void NeuralAmpModeler::_ProcessInput(iplug::sample** inputs, const size_t nFrames, const size_t nChansIn,
                                      const size_t nChansOut)
 {
-  // We'll assume that the main processing is mono for now. We'll handle dual amps later.
-  if (nChansOut != 1)
+  // 支持立体声处理
+  if (nChansOut != 2)
   {
     std::stringstream ss;
-    ss << "Expected mono output, but " << nChansOut << " output channels are requested!";
+    ss << "Expected stereo output, but " << nChansOut << " output channels are requested!";
     throw std::runtime_error(ss.str());
   }
 
-  // On the standalone, we can probably assume that the user has plugged into only one input and they expect it to be
-  // carried straight through. Don't apply any division over nChansIn because we're just "catching anything out there."
-  // However, in a DAW, it's probably something providing stereo, and we want to take the average in order to avoid
-  // doubling the loudness. (This would change w/ double mono processing)
   double gain = mInputGain;
 #ifndef APP_API
   gain /= (float)nChansIn;
 #endif
-  // Assume _PrepareBuffers() was already called
-  for (size_t c = 0; c < nChansIn; c++)
+  // 保留立体声信息，不再将输入混合为单声道
+  // 假设_PrepareBuffers()已经被调用
+  for (size_t c = 0; c < nChansIn && c < nChansOut; c++)
+  {
     for (size_t s = 0; s < nFrames; s++)
-      if (c == 0)
-        mInputArray[0][s] = gain * inputs[c][s];
-      else
-        mInputArray[0][s] += gain * inputs[c][s];
+    {
+      mInputArray[c][s] = gain * inputs[c][s];
+    }
+  }
+  
+  // 如果输入是单声道但输出需要立体声，则复制到两个通道
+  if (nChansIn == 1 && nChansOut == 2)
+  {
+    for (size_t s = 0; s < nFrames; s++)
+    {
+      mInputArray[1][s] = mInputArray[0][s];
+    }
+  }
 }
 
 void NeuralAmpModeler::_ProcessOutput(iplug::sample** inputs, iplug::sample** outputs, const size_t nFrames,
                                       const size_t nChansIn, const size_t nChansOut)
 {
+  // 支持立体声输出
   const double gain = mOutputGain;
-  // Assume _PrepareBuffers() was already called
-  if (nChansIn != 1)
-    throw std::runtime_error("Plugin is supposed to process in mono.");
-  // Broadcast the internal mono stream to all output channels.
-  const size_t cin = 0;
-  for (auto cout = 0; cout < nChansOut; cout++)
-    for (auto s = 0; s < nFrames; s++)
+  
+  // 处理所有可用的输出通道
+  for (size_t c = 0; c < nChansOut && c < nChansIn; c++)
+  {
+    for (size_t s = 0; s < nFrames; s++)
+    {
 #ifdef APP_API // Ensure valid output to interface
-      outputs[cout][s] = std::clamp(gain * inputs[cin][s], -1.0, 1.0);
-#else // In a DAW, other things may come next and should be able to handle large
-      // values.
-      outputs[cout][s] = gain * inputs[cin][s];
+      outputs[c][s] = std::clamp(gain * inputs[c][s], -1.0, 1.0);
+#else // In a DAW, other things may come next and should be able to handle large values.
+      outputs[c][s] = gain * inputs[c][s];
 #endif
+    }
+  }
+  
+  // 如果输入是单声道但输出需要多通道，则复制到所有通道
+  if (nChansIn == 1 && nChansOut > 1)
+  {
+    for (size_t c = 1; c < nChansOut; c++)
+    {
+      for (size_t s = 0; s < nFrames; s++)
+      {
+        outputs[c][s] = outputs[0][s];
+      }
+    }
+  }
 }
 
 void NeuralAmpModeler::_UpdateControlsFromModel()
@@ -902,11 +1085,293 @@ void NeuralAmpModeler::_UpdateLatency()
 void NeuralAmpModeler::_UpdateMeters(sample** inputPointer, sample** outputPointer, const size_t nFrames,
                                      const size_t nChansIn, const size_t nChansOut)
 {
-  // Right now, we didn't specify MAXNC when we initialized these, so it's 1.
-  const int nChansHack = 1;
-  mInputSender.ProcessBlock(inputPointer, (int)nFrames, kCtrlTagInputMeter, nChansHack);
-  mOutputSender.ProcessBlock(outputPointer, (int)nFrames, kCtrlTagOutputMeter, nChansHack);
+  // 支持立体声电平表
+  // 对于立体声，我们可以选择显示两个通道的平均值或最大值
+  // 这里我们选择显示最大值
+  
+  // 创建临时缓冲区来存储合并后的信号
+  std::vector<sample> inputMerged(nFrames);
+  std::vector<sample> outputMerged(nFrames);
+  
+  for (size_t s = 0; s < nFrames; s++)
+  {
+    // 取左右声道的最大值
+    inputMerged[s] = std::max(std::abs(inputPointer[0][s]), std::abs(inputPointer[1][s]));
+    outputMerged[s] = std::max(std::abs(outputPointer[0][s]), std::abs(outputPointer[1][s]));
+  }
+  
+  // 使用合并后的信号更新电平表
+  const int nChansHack = 1; // 仍然使用单通道电平表
+  sample* inputMergedPtr = inputMerged.data();
+  sample* outputMergedPtr = outputMerged.data();
+  mInputSender.ProcessBlock(&inputMergedPtr, (int)nFrames, kCtrlTagInputMeter, nChansHack);
+  mOutputSender.ProcessBlock(&outputMergedPtr, (int)nFrames, kCtrlTagOutputMeter, nChansHack);
 }
 
 // HACK
 #include "Unserialization.cpp"
+
+// 实现模式切换功能
+void NeuralAmpModeler::_UpdateParamsForMode(ProcessingMode mode)
+{
+  mCurrentMode = mode;
+  
+  // 根据模式更新参数范围和默认值
+  if (mode == ProcessingMode::VOCAL)
+  {
+    // 人声模式使用扩展的输入/输出范围
+    GetParam(kInputLevel)->SetBounds(-30.0, 30.0);
+    GetParam(kOutputLevel)->SetBounds(-40.0, 40.0);
+    
+    // 噪声门阈值调整为更适合人声的范围
+    GetParam(kNoiseGateThreshold)->SetBounds(-100.0, -40.0);
+    
+    // 对EQ进行小幅调整以适应人声
+    if (mToneStack) {
+      mToneStack->SetBassFreq(100.0);   // 适合人声的低频
+      mToneStack->SetMidFreq(1000.0);   // 适合人声的中频
+      mToneStack->SetTrebleFreq(5000.0); // 适合人声的高频
+    }
+  }
+  else // Guitar模式
+  {
+    // 恢复吉他模式的参数范围
+    GetParam(kInputLevel)->SetBounds(-20.0, 20.0);
+    GetParam(kOutputLevel)->SetBounds(-40.0, 40.0);
+    
+    // 恢复吉他模式的噪声门阈值范围
+    GetParam(kNoiseGateThreshold)->SetBounds(-100.0, 0.0);
+    
+    // 恢复吉他模式的EQ设置
+    if (mToneStack) {
+      mToneStack->SetBassFreq(82.0);    // 默认吉他低频
+      mToneStack->SetMidFreq(500.0);    // 默认吉他中频
+      mToneStack->SetTrebleFreq(2000.0); // 默认吉他高频
+    }
+  }
+  
+  // 更新UI，如果界面已经加载
+  if (GetUI()) {
+    GetUI()->SetAllControlsDirty();
+  }
+}
+
+// 实现A/B槽位切换
+void NeuralAmpModeler::_SwitchABSlot(bool useSlotB)
+{
+  mUsingSlotB = useSlotB;
+  
+  // 切换模型和IR
+  if (useSlotB) {
+    // 从B槽位加载
+    mModel = std::move(mModelB);
+    mIR = std::move(mIRB);
+  } else {
+    // 从A槽位加载
+    mModel = std::move(mModelA);
+    mIR = std::move(mIRA);
+  }
+  
+  // 更新UI
+  if (GetUI()) {
+    GetUI()->SetAllControlsDirty();
+  }
+}
+
+bool NeuralAmpModeler::LoadModel(const std::string& path)
+{
+  if (path.empty())
+  {
+    mModelPath = "";
+    mModel.reset(nullptr);
+    
+    // 根据当前槽位存储
+    if (mUsingSlotB) {
+      mModelPathB = "";
+      mModelB.reset(nullptr);
+    } else {
+      mModelPathA = "";
+      mModelA.reset(nullptr);
+    }
+    
+    return true;
+  }
+  
+  try
+  {
+    auto model = nam::get_dsp(path);
+    
+    // 存储模型和路径
+    if (mUsingSlotB) {
+      mModelPathB = path;
+      mModelB = std::move(model);
+      mModel = std::move(mModelB);
+    } else {
+      mModelPathA = path;
+      mModelA = std::move(model);
+      mModel = std::move(mModelA);
+    }
+    
+    // 如果是B槽位，需要复制回原始指针
+    if (mUsingSlotB) {
+      mModelB = nam::get_dsp(path); // 重新创建一个B槽位的模型
+    } else {
+      mModelA = nam::get_dsp(path); // 重新创建一个A槽位的模型
+    }
+    
+    mModelPath = path;
+    
+    _UpdateControlsFromModel();
+    _UpdateLatency();
+    
+    return true;
+  }
+  catch (const std::exception& e)
+  {
+    mModelPath = "";
+    mModel.reset(nullptr);
+    
+    // 根据当前槽位清除
+    if (mUsingSlotB) {
+      mModelPathB = "";
+      mModelB.reset(nullptr);
+    } else {
+      mModelPathA = "";
+      mModelA.reset(nullptr);
+    }
+    
+    if (GetUI() != nullptr)
+    {
+      std::stringstream ss;
+      ss << "Failed to load model: " << e.what();
+      _ShowMessageBox(GetUI(), ss.str().c_str(), "Error", EMsgBoxType::kMB_OK);
+    }
+    
+    return false;
+  }
+}
+
+bool NeuralAmpModeler::LoadIR(const std::string& path)
+{
+  if (path.empty())
+  {
+    // 清除IR
+    if (mUsingSlotB) {
+      mIRPathB = "";
+      mIRB.reset(nullptr);
+    } else {
+      mIRPathA = "";
+      mIRA.reset(nullptr);
+    }
+    
+    mIRPath = "";
+    mIR.reset(nullptr);
+    return true;
+  }
+  
+  try
+  {
+    auto irData = dsp::wav::read<kNumChannelsInternal>(path);
+    auto ir = std::make_unique<dsp::IR>(irData, GetSampleRate(), dsp::IR::Mode::kZeroPhase);
+    
+    // 存储IR和路径
+    if (mUsingSlotB) {
+      mIRPathB = path;
+      mIRB = std::move(ir);
+      mIR = std::move(mIRB);
+    } else {
+      mIRPathA = path;
+      mIRA = std::move(ir);
+      mIR = std::move(mIRA);
+    }
+    
+    // 如果是B槽位，需要复制回原始指针
+    if (mUsingSlotB) {
+      mIRB = std::make_unique<dsp::IR>(dsp::wav::read<kNumChannelsInternal>(path), GetSampleRate(), dsp::IR::Mode::kZeroPhase);
+    } else {
+      mIRA = std::make_unique<dsp::IR>(dsp::wav::read<kNumChannelsInternal>(path), GetSampleRate(), dsp::IR::Mode::kZeroPhase);
+    }
+    
+    mIRPath = path;
+    return true;
+  }
+  catch (const std::exception& e)
+  {
+    // 清除IR
+    if (mUsingSlotB) {
+      mIRPathB = "";
+      mIRB.reset(nullptr);
+    } else {
+      mIRPathA = "";
+      mIRA.reset(nullptr);
+    }
+    
+    mIRPath = "";
+    mIR.reset(nullptr);
+    
+    if (GetUI() != nullptr)
+    {
+      std::stringstream ss;
+      ss << "Failed to load IR: " << e.what();
+      _ShowMessageBox(GetUI(), ss.str().c_str(), "Error", EMsgBoxType::kMB_OK);
+    }
+    
+    return false;
+  }
+}
+
+// 修改模型加载界面函数
+void NeuralAmpModeler::_OpenModelFileChooser()
+{
+  if (GetUI() == nullptr) return;
+  
+  const std::string fileChooserStartPath = mCurrentMode == ProcessingMode::VOCAL 
+                                         ? "Vocal Models" // 人声模型文件夹
+                                         : "Models";      // 吉他模型文件夹
+  
+  using namespace iplug;
+  WDL_String dir;
+  GetUI()->PromptForDirectory(dir, fileChooserStartPath.c_str(), "Choose model folder...");
+  if (dir.GetLength()) {
+    WDL_String fileName;
+    GetUI()->PromptForFile(fileName, EFileAction::kFileOpen, dir.Get(), "nam", "Choose NAM model...");
+    if (fileName.GetLength()) {
+      const std::string msg = _StageModel(fileName.Get());
+      if (msg.size()) {
+        std::stringstream ss;
+        ss << "Failed to load NAM model. Message:\n\n" << msg;
+        _ShowMessageBox(GetUI(), ss.str().c_str(), "Failed to load model!", kMB_OK);
+      }
+      std::cout << "Loaded: " << fileName.Get() << std::endl;
+    }
+  }
+}
+
+// 修改IR加载界面函数
+void NeuralAmpModeler::_OpenIRFileChooser()
+{
+  if (GetUI() == nullptr) return;
+  
+  // 根据当前模式设置不同的默认IR文件夹
+  const std::string fileChooserStartPath = mCurrentMode == ProcessingMode::VOCAL 
+                                         ? "Vocal IRs" // 人声IR文件夹
+                                         : "IRs";      // 吉他IR文件夹
+  
+  using namespace iplug;
+  WDL_String dir;
+  GetUI()->PromptForDirectory(dir, fileChooserStartPath.c_str(), "Choose IR folder...");
+  if (dir.GetLength()) {
+    WDL_String fileName;
+    GetUI()->PromptForFile(fileName, EFileAction::kFileOpen, dir.Get(), "wav", "Choose IR wav file...");
+    if (fileName.GetLength()) {
+      mIRPath = fileName.Get();
+      const dsp::wav::LoadReturnCode retCode = _StageIR(fileName.Get());
+      if (retCode != dsp::wav::LoadReturnCode::SUCCESS) {
+        std::stringstream message;
+        message << "Failed to load IR file " << fileName.Get() << ":\n";
+        message << dsp::wav::GetMsgForLoadReturnCode(retCode);
+        _ShowMessageBox(GetUI(), message.str().c_str(), "Failed to load IR!", kMB_OK);
+      }
+    }
+  }
+}

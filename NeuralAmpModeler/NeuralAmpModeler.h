@@ -16,7 +16,7 @@
 
 const int kNumPresets = 1;
 // The plugin is mono inside
-constexpr size_t kNumChannelsInternal = 1;
+constexpr size_t kNumChannelsInternal = 2;
 
 class NAMSender : public iplug::IPeakAvgSender<>
 {
@@ -25,6 +25,12 @@ public:
   : iplug::IPeakAvgSender<>(-90.0, true, 5.0f, 1.0f, 300.0f, 500.0f)
   {
   }
+};
+
+// 添加处理模式枚举
+enum class ProcessingMode {
+  GUITAR,   // 吉他模式
+  VOCAL     // 人声模式
 };
 
 enum EParams
@@ -45,22 +51,36 @@ enum EParams
   kCalibrateInput,
   kInputCalibrationLevel,
   kOutputMode,
+  // 添加新参数
+  kProcessingMode,  // 处理模式切换（吉他/人声）
+  kABToggle,        // A/B比较切换
+  kABMix,           // A/B混合比例
   kNumParams
 };
 
 const int numKnobs = 6;
 
-enum ECtrlTags
+// 更新控件标签
+enum EControlTags
 {
-  kCtrlTagModelFileBrowser = 0,
-  kCtrlTagIRFileBrowser,
-  kCtrlTagInputMeter,
+  kCtrlTagInputMeter = 0,
   kCtrlTagOutputMeter,
-  kCtrlTagSettingsBox,
-  kCtrlTagOutputMode,
+  kCtrlTagFileSelectorMain,
+  kCtrlTagFileSelectorIR,
+  kCtrlTagInLevel,
+  kCtrlTagOutLevel,
+  kCtrlTagNoiseGateActive,
+  kCtrlTagNGThresh,
+  kCtrlTagOutNorm,
+  kCtrlTagIRToggle,
   kCtrlTagCalibrateInput,
   kCtrlTagInputCalibrationLevel,
-  kNumCtrlTags
+  kCtrlTagOutputMode,
+  kCtrlTagSettingsBox,
+  // 添加新控件标签
+  kCtrlTagProcessingMode, // 处理模式
+  kCtrlTagABToggle,       // A/B切换
+  kCtrlTagABMix           // A/B混合比例
 };
 
 enum EMsgTags
@@ -201,6 +221,16 @@ public:
   void OnParamChangeUI(int paramIdx, iplug::EParamSource source) override;
   bool OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pData) override;
 
+  // 模型加载
+  void _StageModelFile(const WDL_String& fileName);
+  void _StageIRFile(const WDL_String& fileName);
+  std::string _StageModel(const std::string& path);
+  dsp::wav::LoadReturnCode _StageIR(const std::string& path);
+  
+  // 新的文件选择函数
+  void _OpenModelFileChooser();
+  void _OpenIRFileChooser();
+
 private:
   // Allocates mInputPointers and mOutputPointers
   void _AllocateIOPointers(const size_t nChans);
@@ -312,4 +342,25 @@ private:
   std::unordered_map<std::string, double> mNAMParams = {{"Input", 0.0}, {"Output", 0.0}};
 
   NAMSender mInputSender, mOutputSender;
+
+  // 添加模式相关成员变量
+  ProcessingMode mCurrentMode = ProcessingMode::GUITAR;
+  bool mUsingSlotB = false;  // 用于A/B比较，false=A槽位，true=B槽位
+  double mABMixRatio = 0.0;  // 0.0=完全A, 1.0=完全B
+  
+  // A/B槽位模型存储
+  std::unique_ptr<nam::dsp::DSP> mModelA;
+  std::unique_ptr<nam::dsp::DSP> mModelB;
+  std::string mModelPathA;
+  std::string mModelPathB;
+  
+  // IR存储
+  std::unique_ptr<dsp::IR> mIRA;
+  std::unique_ptr<dsp::IR> mIRB;
+  std::string mIRPathA;
+  std::string mIRPathB;
+  
+  // 模式相关函数
+  void _UpdateParamsForMode(ProcessingMode mode);
+  void _SwitchABSlot(bool useSlotB);
 };
